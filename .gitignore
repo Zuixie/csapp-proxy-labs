@@ -1,0 +1,6 @@
+proxy
+*.o
+scp2linux.sh
+tiny/cgi-bin/adder
+tiny/tiny
+
