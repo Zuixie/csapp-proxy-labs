@@ -1,27 +1,9 @@
 #include "csapp.h"
+#include "cache.h"
+#include "error.h"
+#include "debug.h"
 #include <stdio.h>
 
-#ifndef __DEBUG_H__
-#define __DEBUG_H__
-
-#define DEBUG
-#ifdef DEBUG
-# define dbg_printf(...) printf(__VA_ARGS__)
-# define LOG(str) (printf("%s (%d) - <%s> %s\n", __FILE__ , __LINE__ ,__FUNCTION__, str))
-#else
-# define dbg_printf(...)
-# define LOG(str) 
-#endif
-
-#endif
-
-#define SUCCESS 0
-
-#define ERROR_ADD_FIELD_MALLOC 0x01
-#define ERROR_NO_HOST_FIELD 0x02
-#define ERROR_REQUEST_LINE 0x03
-#define ERROR_MALLOC_FAIL 0x04
-#define ERROR_RESPONSE_LINE 0x05
 
 #define HEAD_CONTENT_LENGTH "Content-Length"
 #define HEAD_HOST "Host"
@@ -63,6 +45,8 @@ typedef struct
     int content_length;
 } response;
 
+static cache ca;
+
 struct field *findfields_by_key(struct field *field_list, char *key);
 int addfield(struct field *field_list, const char *key, const char *value);
 int remove_fields_by_key(struct field *field_list, char *key);
@@ -95,6 +79,7 @@ int write_to_server(int connfd, request *req);
 void release_response(response *resp);
 void release_request(request *req);
 
+int service_with_cache(int connfd, char *cache_obj, int cache_obj_size);
 int service_with_https(int connfd, rio_t *rio, request *req);
 
 void printf_request(request *req);
@@ -157,6 +142,7 @@ void sigpipe_handler(int sig)
 int init()
 {
     Signal(SIGPIPE,  sigpipe_handler);
+    init_cache(&ca);
     return SUCCESS;
 }
 
@@ -181,14 +167,6 @@ void service(int connfd)
 {
     pthread_t tid;
     Pthread_create(&tid, NULL, thread, (void *)(connfd));
-    // int ret;
-	// ret = doit(connfd);
-    // if (ret != SUCCESS)
-    // {
-    //     fprintf(stderr, "service failed ret:%d\n", ret);
-    // }
-
-    // Close(connfd);   
 }
 
 int doit(int connfd)
@@ -233,7 +211,18 @@ int doit(int connfd)
     {
         goto _exit;
     }
-    // dbg_printf("host:%s port:%s\n", host, port);
+
+    // check cache
+    char cache_buf[MAX_OBJECT_SIZE];
+    unsigned int cache_obj_size = MAX_OBJECT_SIZE;
+    char request_uri_buf[MAXLINE];
+    memcpy(request_uri_buf, req.uri, strlen(req.uri) + 1);
+    ret = find_cache(&ca, req.uri, cache_buf, &cache_obj_size);
+    if (ret == SUCCESS)
+    {
+        ret = service_with_cache(connfd, cache_buf, cache_obj_size);
+        goto _exit;
+    }
 
     // modify content of the request to meet the expreimental requirements 
     if ((ret = fix_request(&req)) != SUCCESS)
@@ -269,7 +258,14 @@ int doit(int connfd)
     // write to client;
     fix_response(&resp);
     ret = write_to_client(connfd, &resp);
+    
+    // caching
+    if (resp.status_code == 200) 
+    {
+        add_cache(&ca, request_uri_buf, resp.content, resp.content_length);
+        dbg_printf("cache...OK\n");
 
+    }
 _exit:
 
     if (server_fd >= 0)
@@ -354,6 +350,26 @@ _quit:
         Close(server_fd);
 
     return SUCCESS;
+}
+
+
+int service_with_cache(int connfd, char *cache_obj, int cache_obj_size)
+{
+    LOG("start...");
+    // create response;
+    int ret = SUCCESS;
+    response resp;
+    memset(&resp, 0, sizeof(response));
+    resp.version = HTTP_VERSION;
+    resp.status_code = 200;
+    resp.status_msg = "OK";
+    resp.content = cache_obj;
+    resp.content_length = cache_obj_size;
+
+    write_to_client(connfd, &resp);
+
+    LOG("end...");
+    return ret;
 }
 
 int read_response(rio_t *rio, response *resp)
@@ -999,7 +1015,7 @@ int write_to_client(int connfd, response *resp)
     {
         goto _quit;
     }
-    
+
     ret = generate_fields_str(&resp->field_list, buf + length_header, length_fields);
     if (ret != SUCCESS)
     {
@@ -1008,7 +1024,7 @@ int write_to_client(int connfd, response *resp)
 
     Rio_writen(connfd, buf, strlen(buf));
     Rio_writen(connfd, resp->content, resp->content_length);
-    
+
 _quit:
     if (buf)
     {
@@ -1016,7 +1032,7 @@ _quit:
     }
 
     LOG("end");
-    return SUCCESS;
+    return ret;
 }
 
 int write_to_server(int connfd, request *req)
